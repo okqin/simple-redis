@@ -1,3 +1,4 @@
+mod decode;
 mod encode;
 
 use std::{
@@ -5,9 +6,32 @@ use std::{
     hash::Hash,
 };
 
+use bytes::BytesMut;
 use derive_more::{Deref, Display};
 use enum_dispatch::enum_dispatch;
 use ordered_float::OrderedFloat;
+use thiserror::Error;
+
+#[derive(Debug, Error, PartialEq)]
+pub enum RespError {
+    #[error("Invalid frame: {0}")]
+    InvalidFrame(String),
+
+    #[error("Invalid frame type: {0}")]
+    InvalidFrameType(String),
+
+    #[error("Invalid frame length: {0}")]
+    InvalidFrameLength(String),
+
+    #[error("Frame is not complete")]
+    FrameNotComplete,
+
+    #[error("Invalid integer: {0}")]
+    ParseIntError(#[from] std::num::ParseIntError),
+
+    #[error("Invalid float: {0}")]
+    ParseFloatError(#[from] std::num::ParseFloatError),
+}
 
 #[enum_dispatch(RespEncoder)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -16,9 +40,7 @@ pub enum RespFrame {
     SimpleError(RespSimpleError),
     Integer(i64),
     BulkString(RespBulkString),
-    BulkStringNull(RespBulkStringNull),
     Array(RespArray),
-    ArrayNull(RespArrayNull),
     Null(RespNull),
     Boolean(bool),
     Double(RespDouble),
@@ -35,14 +57,8 @@ pub struct RespSimpleError(String);
 #[derive(Debug, Clone, Deref, PartialEq, Eq, Hash)]
 pub struct RespBulkString(Vec<u8>);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RespBulkStringNull;
-
 #[derive(Debug, Clone, Deref, PartialEq, Eq, Hash)]
 pub struct RespArray(Vec<RespFrame>);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RespArrayNull;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RespNull;
@@ -59,6 +75,13 @@ pub struct RespSet(HashSet<RespFrame>);
 #[enum_dispatch]
 pub trait RespEncoder {
     fn encode(self) -> Vec<u8>;
+}
+
+pub trait RespDecoder: Sized {
+    const PREFIX: &'static str;
+    fn decode(buf: &mut BytesMut) -> Result<RespFrame, RespError>;
+
+    fn expect_length(buf: &[u8]) -> Result<usize, RespError>;
 }
 
 impl RespSimpleString {

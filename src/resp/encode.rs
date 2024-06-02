@@ -1,6 +1,6 @@
 use super::{
-    RespArray, RespArrayNull, RespBulkString, RespBulkStringNull, RespDouble, RespEncoder, RespMap,
-    RespNull, RespSet, RespSimpleError, RespSimpleString,
+    RespArray, RespBulkString, RespDouble, RespEncoder, RespMap, RespNull, RespSet,
+    RespSimpleError, RespSimpleString,
 };
 
 const CAPACITY: usize = 4096;
@@ -38,13 +38,6 @@ impl RespEncoder for RespBulkString {
     }
 }
 
-// Null bulk string format "$-1\r\n"
-impl RespEncoder for RespBulkStringNull {
-    fn encode(self) -> Vec<u8> {
-        b"$-1\r\n".to_vec()
-    }
-}
-
 // Arrays format "*<number-of-elements>\r\n<element-1>...<element-n>"
 impl RespEncoder for RespArray {
     fn encode(self) -> Vec<u8> {
@@ -54,13 +47,6 @@ impl RespEncoder for RespArray {
             buf.extend(frame.encode());
         }
         buf
-    }
-}
-
-// Null array format "*-1\r\n"
-impl RespEncoder for RespArrayNull {
-    fn encode(self) -> Vec<u8> {
-        b"*-1\r\n".to_vec()
     }
 }
 
@@ -159,12 +145,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bulk_string_null_encode() {
-        let bulk_string_null: RespFrame = RespBulkStringNull.into();
-        assert_eq!(bulk_string_null.encode(), b"$-1\r\n");
-    }
-
-    #[test]
     fn test_array_encode() {
         let array: RespFrame = RespArray::new(vec![
             RespSimpleString::new("foo").into(),
@@ -177,12 +157,6 @@ mod tests {
             array.encode(),
             b"*4\r\n+foo\r\n+bar\r\n$6\r\nfoobar\r\n*1\r\n:64\r\n"
         );
-    }
-
-    #[test]
-    fn test_array_null_encode() {
-        let array_null: RespFrame = RespArrayNull.into();
-        assert_eq!(array_null.encode(), b"*-1\r\n");
     }
 
     #[test]
