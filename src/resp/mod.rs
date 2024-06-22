@@ -7,7 +7,7 @@ use std::{
 };
 
 use bytes::BytesMut;
-use derive_more::{Deref, Display};
+use derive_more::{AsRef, Deref, Display, From};
 use enum_dispatch::enum_dispatch;
 use ordered_float::OrderedFloat;
 use thiserror::Error;
@@ -16,12 +16,6 @@ use thiserror::Error;
 pub enum RespError {
     #[error("Invalid frame: {0}")]
     InvalidFrame(String),
-
-    #[error("Invalid frame type: {0}")]
-    InvalidFrameType(String),
-
-    #[error("Invalid frame length: {0}")]
-    InvalidFrameLength(String),
 
     #[error("Frame is not complete")]
     FrameNotComplete,
@@ -48,29 +42,30 @@ pub enum RespFrame {
     Set(RespSet),
 }
 
-#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash)]
-pub struct RespSimpleString(String);
+#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash, From)]
+pub struct RespSimpleString(pub(crate) String);
 
-#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash)]
-pub struct RespSimpleError(String);
+#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash, From)]
+pub struct RespSimpleError(pub(crate) String);
 
-#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash)]
-pub struct RespBulkString(Vec<u8>);
+#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash, AsRef, From)]
+#[from(String, &'static str, &[u8])]
+pub struct RespBulkString(pub(crate) Vec<u8>);
 
-#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash)]
-pub struct RespArray(Vec<RespFrame>);
+#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash, From)]
+pub struct RespArray(pub(crate) Vec<RespFrame>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RespNull;
 
-#[derive(Debug, Clone, Deref, Display, PartialEq, Eq, Hash)]
-pub struct RespDouble(OrderedFloat<f64>);
+#[derive(Debug, Clone, Deref, Display, PartialEq, Eq, Hash, From)]
+pub struct RespDouble(pub(crate) OrderedFloat<f64>);
 
-#[derive(Debug, Clone, Deref, PartialEq, Eq)]
-pub struct RespMap(HashMap<RespFrame, RespFrame>);
+#[derive(Debug, Clone, Deref, PartialEq, Eq, From)]
+pub struct RespMap(pub(crate) HashMap<RespFrame, RespFrame>);
 
-#[derive(Debug, Clone, Deref, PartialEq, Eq)]
-pub struct RespSet(HashSet<RespFrame>);
+#[derive(Debug, Clone, Deref, PartialEq, Eq, From)]
+pub struct RespSet(pub(crate) HashSet<RespFrame>);
 
 #[enum_dispatch]
 pub trait RespEncoder {
@@ -79,7 +74,7 @@ pub trait RespEncoder {
 
 pub trait RespDecoder: Sized {
     const PREFIX: &'static str;
-    fn decode(buf: &mut BytesMut) -> Result<RespFrame, RespError>;
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError>;
 
     fn expect_length(buf: &[u8]) -> Result<usize, RespError>;
 }
