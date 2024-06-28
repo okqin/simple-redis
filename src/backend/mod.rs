@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use crate::RespFrame;
 use dashmap::DashMap;
 use derive_more::Deref;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Deref, Default)]
 pub struct Backend(Arc<BackendInner>);
@@ -26,6 +25,10 @@ impl Backend {
         self.map.insert(key, value);
     }
 
+    pub fn del(&self, key: &str) -> bool {
+        self.map.remove(key).is_some()
+    }
+
     pub fn hget(&self, key: &str, field: &str) -> Option<RespFrame> {
         self.hmap
             .get(key)
@@ -39,5 +42,36 @@ impl Backend {
 
     pub fn hgetall(&self, key: &str) -> Option<DashMap<String, RespFrame>> {
         self.hmap.get(key).map(|v| v.clone())
+    }
+
+    pub fn hkeys(&self, key: &str) -> Option<Vec<String>> {
+        self.hmap
+            .get(key)
+            .map(|v| v.iter().map(|v| v.key().to_owned()).collect())
+    }
+
+    pub fn hdel(&self, key: &str, field: &str) -> bool {
+        self.hmap
+            .get(key)
+            .map(|v| v.remove(field).is_some())
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend() {
+        let backend = Backend::new();
+        backend.hset(
+            "key".into(),
+            "field".into(),
+            RespFrame::SimpleString("value".into()),
+        );
+        assert!(backend.hdel("key", "field"));
+        assert!(!backend.hdel("key", "field"));
+        assert!(!backend.hdel("ke", "field"));
     }
 }

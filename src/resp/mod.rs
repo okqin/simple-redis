@@ -1,16 +1,39 @@
-mod decode;
-mod encode;
-
-use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
-};
+mod array;
+mod bool;
+mod bulk_string;
+mod double;
+mod frame;
+mod integer;
+mod map;
+mod null;
+mod set;
+mod simple_error;
+mod simple_string;
 
 use bytes::BytesMut;
-use derive_more::{AsRef, Deref, Display, From};
 use enum_dispatch::enum_dispatch;
-use ordered_float::OrderedFloat;
 use thiserror::Error;
+
+pub use self::{
+    array::RespArray, bulk_string::BulkString, double::RespDouble, frame::RespFrame, map::RespMap,
+    null::RespNull, set::RespSet, simple_error::SimpleError, simple_string::SimpleString,
+};
+
+const CAPACITY: usize = 4096;
+const RESP2_NULL: &str = "-1\r\n";
+const CRLF_LEN: usize = b"\r\n".len();
+
+#[enum_dispatch]
+pub trait RespEncoder {
+    fn encode(self) -> Vec<u8>;
+}
+
+pub trait RespDecoder: Sized {
+    const PREFIX: &'static str;
+    fn decode(buf: &mut BytesMut) -> Result<Self, RespError>;
+
+    fn expect_length(buf: &[u8]) -> Result<usize, RespError>;
+}
 
 #[derive(Debug, Error, PartialEq)]
 pub enum RespError {
@@ -27,111 +50,71 @@ pub enum RespError {
     ParseFloatError(#[from] std::num::ParseFloatError),
 }
 
-#[enum_dispatch(RespEncoder)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RespFrame {
-    SimpleString(RespSimpleString),
-    SimpleError(RespSimpleError),
-    Integer(i64),
-    BulkString(RespBulkString),
-    Array(RespArray),
-    Null(RespNull),
-    Boolean(bool),
-    Double(RespDouble),
-    Map(RespMap),
-    Set(RespSet),
-}
-
-#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash, From)]
-pub struct RespSimpleString(pub(crate) String);
-
-#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash, From)]
-pub struct RespSimpleError(pub(crate) String);
-
-#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash, AsRef, From)]
-#[from(String, &'static str, &[u8])]
-pub struct RespBulkString(pub(crate) Vec<u8>);
-
-#[derive(Debug, Clone, Deref, PartialEq, Eq, Hash, From)]
-pub struct RespArray(pub(crate) Vec<RespFrame>);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RespNull;
-
-#[derive(Debug, Clone, Deref, Display, PartialEq, Eq, Hash, From)]
-pub struct RespDouble(pub(crate) OrderedFloat<f64>);
-
-#[derive(Debug, Clone, Deref, PartialEq, Eq, From)]
-pub struct RespMap(pub(crate) HashMap<RespFrame, RespFrame>);
-
-#[derive(Debug, Clone, Deref, PartialEq, Eq, From)]
-pub struct RespSet(pub(crate) HashSet<RespFrame>);
-
-#[enum_dispatch]
-pub trait RespEncoder {
-    fn encode(self) -> Vec<u8>;
-}
-
-pub trait RespDecoder: Sized {
-    const PREFIX: &'static str;
-    fn decode(buf: &mut BytesMut) -> Result<Self, RespError>;
-
-    fn expect_length(buf: &[u8]) -> Result<usize, RespError>;
-}
-
-impl RespSimpleString {
-    pub fn new(s: impl Into<String>) -> Self {
-        RespSimpleString(s.into())
+fn extract_simple_resp(buf: &[u8], prefix: &str) -> Result<usize, RespError> {
+    if buf.len() < 3 {
+        return Err(RespError::FrameNotComplete);
     }
-}
 
-impl RespSimpleError {
-    pub fn new(s: impl Into<String>) -> Self {
-        RespSimpleError(s.into())
+    if !buf.starts_with(prefix.as_bytes()) {
+        return Err(RespError::InvalidFrame(format!(
+            "expected start with: {}, found: {:?}",
+            prefix, buf
+        )));
     }
+    let end = find_crlf(buf, 1).ok_or(RespError::FrameNotComplete)?;
+    Ok(end)
 }
 
-impl RespBulkString {
-    pub fn new(s: impl Into<Vec<u8>>) -> Self {
-        RespBulkString(s.into())
+// find nth CRLF in the buffer
+fn find_crlf(buf: &[u8], nth: usize) -> Option<usize> {
+    let mut count = 0;
+    for i in 1..buf.len() - 1 {
+        if buf[i] == b'\r' && buf[i + 1] == b'\n' {
+            count += 1;
+            if count == nth {
+                return Some(i);
+            }
+        }
     }
+
+    None
 }
 
-impl RespArray {
-    pub fn new(frames: impl Into<Vec<RespFrame>>) -> Self {
-        RespArray(frames.into())
-    }
+fn parse_length(buf: &[u8], prefix: &str) -> Result<(usize, usize), RespError> {
+    let end = extract_simple_resp(buf, prefix)?;
+    let len = String::from_utf8_lossy(&buf[prefix.len()..end]).parse()?;
+    Ok((end, len))
 }
 
-impl RespDouble {
-    pub fn new(f: f64) -> Self {
-        RespDouble(OrderedFloat(f))
-    }
+// compatible with RESP2 null
+fn check_resp2_null(buf: &[u8], prefix: &str) -> bool {
+    buf.starts_with(format!("{}{}", prefix, RESP2_NULL).as_bytes())
 }
 
-impl RespMap {
-    pub fn new(map: impl Into<HashMap<RespFrame, RespFrame>>) -> Self {
-        RespMap(map.into())
-    }
-}
+fn calc_total_length(buf: &[u8], end: usize, len: usize, prefix: &str) -> Result<usize, RespError> {
+    let mut total = end + CRLF_LEN;
+    let mut data = &buf[total..];
+    match prefix {
+        "*" | "~" => {
+            for _ in 0..len {
+                let len = RespFrame::expect_length(data)?;
+                data = &data[len..];
+                total += len;
+            }
+            Ok(total)
+        }
+        "%" => {
+            for _ in 0..len {
+                let key_len = RespFrame::expect_length(data)?;
+                data = &data[key_len..];
 
-impl RespSet {
-    pub fn new(set: impl Into<HashSet<RespFrame>>) -> Self {
-        RespSet(set.into())
-    }
-}
+                let value_len = RespFrame::expect_length(data)?;
+                data = &data[value_len..];
 
-impl Hash for RespSet {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.iter().for_each(|frame| frame.hash(state));
-    }
-}
-
-impl Hash for RespMap {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.iter().for_each(|(k, v)| {
-            k.hash(state);
-            v.hash(state);
-        });
+                total += key_len + value_len;
+            }
+            Ok(total)
+        }
+        _ => Ok(len + total),
     }
 }
