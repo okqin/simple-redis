@@ -1,68 +1,35 @@
-use super::{
-    extract_args, validate_args, validate_args_fixed, validate_command, CommandError,
-    CommandExecutor, RESP_OK,
-};
+use super::{extract_args, validate_command, CommandError, CommandExecutor, KeyValue, RESP_OK};
 use crate::{Backend, RespArray, RespFrame, RespNull};
+use derive_more::Deref;
 
-#[derive(Debug)]
-pub struct Set {
-    key: String,
-    value: RespFrame,
-}
-
-#[derive(Debug)]
-pub struct Get {
-    key: String,
-}
-
-#[derive(Debug)]
-pub struct Del {
-    key: Vec<String>,
-}
-
-impl CommandExecutor for Get {
-    fn execute(self, backend: &Backend) -> RespFrame {
-        match backend.get(&self.key) {
-            Some(value) => value,
-            None => RespFrame::Null(RespNull),
-        }
-    }
-}
+#[derive(Debug, Deref)]
+pub struct Set(KeyValue);
 
 impl CommandExecutor for Set {
     fn execute(self, backend: &Backend) -> RespFrame {
-        backend.set(self.key, self.value);
+        backend.set(self.0.key, self.0.value);
         RESP_OK.clone()
-    }
-}
-
-impl CommandExecutor for Del {
-    fn execute(self, backend: &Backend) -> RespFrame {
-        let mut count = 0;
-        for key in self.key {
-            if backend.del(&key) {
-                count += 1;
-            }
-        }
-        RespFrame::Integer(count as i64)
     }
 }
 
 impl TryFrom<RespArray> for Set {
     type Error = CommandError;
     fn try_from(value: RespArray) -> Result<Self, Self::Error> {
-        validate_command(&value, &["set"])?;
-        validate_args_fixed(&value, &["set"], 2)?;
+        let cmd_names = ["set"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
+    }
+}
 
-        let mut args = extract_args(value, 1)?.into_iter();
-        match (args.next(), args.next()) {
-            (Some(RespFrame::BulkString(key)), Some(value)) => Ok(Set {
-                key: String::from_utf8(key.0)?,
-                value,
-            }),
-            _ => Err(CommandError::InvalidCommandArguments(
-                "Invalid key or value".to_string(),
-            )),
+#[derive(Debug, Deref)]
+pub struct Get(String);
+
+impl CommandExecutor for Get {
+    fn execute(self, backend: &Backend) -> RespFrame {
+        match backend.get(&self) {
+            Some(value) => value,
+            None => RespFrame::Null(RespNull),
         }
     }
 }
@@ -70,38 +37,55 @@ impl TryFrom<RespArray> for Set {
 impl TryFrom<RespArray> for Get {
     type Error = CommandError;
     fn try_from(value: RespArray) -> Result<Self, Self::Error> {
-        validate_command(&value, &["get"])?;
-        validate_args_fixed(&value, &["get"], 1)?;
+        let cmd_names = ["get"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
+    }
+}
 
-        let mut args = extract_args(value, 1)?.into_iter();
-        match args.next() {
-            Some(RespFrame::BulkString(key)) => Ok(Get {
-                key: String::from_utf8(key.0)?,
-            }),
-            _ => Err(CommandError::InvalidCommandArguments(
-                "Invalid key".to_string(),
-            )),
+#[derive(Debug, Deref)]
+pub struct Del(Vec<String>);
+
+impl CommandExecutor for Del {
+    fn execute(self, backend: &Backend) -> RespFrame {
+        let mut count = 0;
+        for key in self.iter() {
+            if backend.del(key) {
+                count += 1;
+            }
         }
+        RespFrame::Integer(count as i64)
     }
 }
 
 impl TryFrom<RespArray> for Del {
     type Error = CommandError;
     fn try_from(value: RespArray) -> Result<Self, Self::Error> {
-        validate_command(&value, &["del"])?;
-        validate_args(&value, &["del"])?;
+        let cmd_names = ["del"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
+    }
+}
 
-        let keys = extract_args(value, 1)?
-            .into_iter()
-            .map(|k| match k {
-                RespFrame::BulkString(key) => Ok(String::from_utf8(key.0)?),
-                _ => Err(CommandError::InvalidCommandArguments(
-                    "Invalid key".to_string(),
-                )),
-            })
-            .collect::<Result<Vec<String>, CommandError>>()?;
+#[derive(Debug, Deref)]
+pub struct Echo(String);
 
-        Ok(Del { key: keys })
+impl CommandExecutor for Echo {
+    fn execute(self, _backend: &Backend) -> RespFrame {
+        RespFrame::BulkString(self.0.into())
+    }
+}
+
+impl TryFrom<RespArray> for Echo {
+    type Error = CommandError;
+    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
+        let cmd_names = ["echo"];
+        validate_command(&value, &cmd_names)?;
+
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
     }
 }
 
@@ -118,7 +102,7 @@ mod tests {
         buf.extend_from_slice(b"*2\r\n$3\r\nget\r\n$4\r\nname\r\n");
         let frame = RespArray::decode(&mut buf)?;
         let get = Get::try_from(frame)?;
-        assert_eq!(get.key, "name");
+        assert_eq!(get.0, "name");
         Ok(())
     }
 
@@ -136,16 +120,15 @@ mod tests {
     #[test]
     fn test_set_and_get_cmd_execute() {
         let backend = Backend::new();
-        let cmd = Set {
+        let key_value = KeyValue {
             key: "name".to_string(),
             value: RespFrame::BulkString("victory".into()),
         };
+        let cmd = Set(key_value);
         let resp = cmd.execute(&backend);
         assert_eq!(resp, RESP_OK.clone());
 
-        let cmd = Get {
-            key: "name".to_string(),
-        };
+        let cmd = Get("name".to_string());
         let resp = cmd.execute(&backend);
         assert_eq!(resp, RespFrame::BulkString("victory".into()));
     }

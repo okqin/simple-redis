@@ -1,47 +1,58 @@
+use derive_more::Deref;
+
 use super::{
-    extract_args, validate_args_fixed, validate_args_hmap, validate_args_hmap_pair,
-    validate_command, CommandError, CommandExecutor,
+    extract_args, validate_command, CommandError, CommandExecutor, Hmap, KeyField, KeyFields,
+    RESP_OK,
 };
 use crate::{Backend, BulkString, RespArray, RespFrame, RespNull};
 
-#[derive(Debug, Default)]
-pub struct HSet {
-    key: String,
-    values: Vec<(String, RespFrame)>,
-}
-
-#[derive(Debug)]
-pub struct HGet {
-    key: String,
-    field: String,
-}
-
-#[derive(Debug)]
-pub struct HDel {
-    key: String,
-    field: Vec<String>,
-}
-
-#[derive(Debug)]
-pub struct HGetAll {
-    key: String,
-    sort: bool,
-}
-
-#[derive(Debug)]
-pub struct HKeys {
-    key: String,
-}
+#[derive(Debug, Deref)]
+pub struct HSet(Hmap);
 
 impl CommandExecutor for HSet {
     fn execute(self, backend: &Backend) -> RespFrame {
-        let len = self.values.len();
-        for v in self.values {
-            backend.hset(self.key.clone(), v.0, v.1);
+        let len = self.map.len();
+        for v in self.0.map {
+            backend.hset(self.0.key.clone(), v.0, v.1);
         }
         RespFrame::Integer(len as i64)
     }
 }
+
+impl TryFrom<RespArray> for HSet {
+    type Error = CommandError;
+    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
+        let cmd_names = ["hset"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
+    }
+}
+
+#[derive(Debug, Deref)]
+pub struct Hmset(Hmap);
+
+impl CommandExecutor for Hmset {
+    fn execute(self, backend: &Backend) -> RespFrame {
+        for v in self.0.map {
+            backend.hset(self.0.key.clone(), v.0, v.1);
+        }
+        RESP_OK.clone()
+    }
+}
+
+impl TryFrom<RespArray> for Hmset {
+    type Error = CommandError;
+    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
+        let cmd_names = ["hmset"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
+    }
+}
+
+#[derive(Debug, Deref)]
+pub struct HGet(KeyField);
 
 impl CommandExecutor for HGet {
     fn execute(self, backend: &Backend) -> RespFrame {
@@ -52,11 +63,50 @@ impl CommandExecutor for HGet {
     }
 }
 
+impl TryFrom<RespArray> for HGet {
+    type Error = CommandError;
+    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
+        let cmd_names = ["hget"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
+    }
+}
+
+#[derive(Debug, Deref)]
+pub struct Hmget(KeyFields);
+
+impl CommandExecutor for Hmget {
+    fn execute(self, backend: &Backend) -> RespFrame {
+        let mut data = Vec::with_capacity(self.fields.len());
+        for field in self.fields.iter() {
+            match backend.hget(&self.key, field) {
+                Some(value) => data.push(value),
+                None => data.push(RespFrame::Null(RespNull)),
+            }
+        }
+        RespArray::new(data).into()
+    }
+}
+
+impl TryFrom<RespArray> for Hmget {
+    type Error = CommandError;
+    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
+        let cmd_names = ["hmget"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
+    }
+}
+
+#[derive(Debug, Deref)]
+pub struct HDel(KeyFields);
+
 impl CommandExecutor for HDel {
     fn execute(self, backend: &Backend) -> RespFrame {
         let mut count = 0;
-        for field in self.field {
-            if backend.hdel(&self.key, &field) {
+        for field in self.fields.iter() {
+            if backend.hdel(&self.key, field) {
                 count += 1;
             }
         }
@@ -64,9 +114,25 @@ impl CommandExecutor for HDel {
     }
 }
 
+impl TryFrom<RespArray> for HDel {
+    type Error = CommandError;
+    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
+        let cmd_names = ["hdel"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
+    }
+}
+
+#[derive(Debug)]
+pub struct HGetAll {
+    key: String,
+    sort: bool,
+}
+
 impl CommandExecutor for HGetAll {
     fn execute(self, backend: &Backend) -> RespFrame {
-        let hmap = backend.hmap.get(&self.key);
+        let hmap = backend.hgetall(&self.key);
         match hmap {
             Some(hmap) => {
                 let mut data = Vec::with_capacity(hmap.len());
@@ -89,9 +155,25 @@ impl CommandExecutor for HGetAll {
     }
 }
 
+impl TryFrom<RespArray> for HGetAll {
+    type Error = CommandError;
+    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
+        let cmd_names = ["hgetall"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self {
+            key: args.try_into()?,
+            sort: false,
+        })
+    }
+}
+
+#[derive(Debug, Deref)]
+pub struct HKeys(String);
+
 impl CommandExecutor for HKeys {
     fn execute(self, backend: &Backend) -> RespFrame {
-        match backend.hmap.get(&self.key) {
+        match backend.hgetall(&self) {
             Some(hmap) => {
                 let keys = hmap
                     .iter()
@@ -109,121 +191,13 @@ impl CommandExecutor for HKeys {
     }
 }
 
-impl TryFrom<RespArray> for HSet {
-    type Error = CommandError;
-    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
-        validate_command(&value, &["hset"])?;
-        validate_args_hmap_pair(&value, &["hset"])?;
-        let mut args = extract_args(value, 1)?.into_iter();
-        let key = match args.next() {
-            Some(RespFrame::BulkString(key)) => String::from_utf8(key.0)?,
-            _ => {
-                return Err(CommandError::InvalidCommandArguments(
-                    "Invalid key".to_string(),
-                ))
-            }
-        };
-        let mut hset = HSet {
-            key,
-            values: Vec::new(),
-        };
-        while let (Some(f), Some(v)) = (args.next(), args.next()) {
-            match (f, v) {
-                (RespFrame::BulkString(field), value) => {
-                    hset.values.push((String::from_utf8(field.0)?, value))
-                }
-                (_, _) => {
-                    return Err(CommandError::InvalidCommandArguments(
-                        "Invalid key, field or value".to_string(),
-                    ))
-                }
-            }
-        }
-        Ok(hset)
-    }
-}
-
-impl TryFrom<RespArray> for HGet {
-    type Error = CommandError;
-    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
-        validate_command(&value, &["hget"])?;
-        validate_args_fixed(&value, &["hget"], 2)?;
-        let mut args = extract_args(value, 1)?.into_iter();
-        match (args.next(), args.next()) {
-            (Some(RespFrame::BulkString(key)), Some(RespFrame::BulkString(field))) => Ok(HGet {
-                key: String::from_utf8(key.0)?,
-                field: String::from_utf8(field.0)?,
-            }),
-            _ => Err(CommandError::InvalidCommandArguments(
-                "Invalid key or field".to_string(),
-            )),
-        }
-    }
-}
-
-impl TryFrom<RespArray> for HDel {
-    type Error = CommandError;
-    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
-        validate_command(&value, &["hdel"])?;
-        validate_args_hmap(&value, &["hdel"])?;
-
-        let mut args = extract_args(value, 1)?.into_iter();
-        match args.next() {
-            Some(RespFrame::BulkString(key)) => {
-                let field = args
-                    .map(|f| match f {
-                        RespFrame::BulkString(f) => Ok(String::from_utf8(f.0)?),
-                        _ => Err(CommandError::InvalidCommandArguments(
-                            "Invalid field".to_string(),
-                        )),
-                    })
-                    .collect::<Result<Vec<String>, CommandError>>()?;
-                Ok(HDel {
-                    key: String::from_utf8(key.0)?,
-                    field,
-                })
-            }
-            _ => Err(CommandError::InvalidCommandArguments(
-                "Invalid key".to_string(),
-            )),
-        }
-    }
-}
-
-impl TryFrom<RespArray> for HGetAll {
-    type Error = CommandError;
-    fn try_from(value: RespArray) -> Result<Self, Self::Error> {
-        validate_command(&value, &["hgetall"])?;
-        validate_args_fixed(&value, &["hgetall"], 1)?;
-
-        let mut args = extract_args(value, 1)?.into_iter();
-        match args.next() {
-            Some(RespFrame::BulkString(key)) => Ok(HGetAll {
-                key: String::from_utf8(key.0)?,
-                sort: false,
-            }),
-            _ => Err(CommandError::InvalidCommandArguments(
-                "Invalid key".to_string(),
-            )),
-        }
-    }
-}
-
 impl TryFrom<RespArray> for HKeys {
     type Error = CommandError;
     fn try_from(value: RespArray) -> Result<Self, Self::Error> {
-        validate_command(&value, &["hkeys"])?;
-        validate_args_fixed(&value, &["hkeys"], 1)?;
-
-        let mut args = extract_args(value, 1)?.into_iter();
-        match args.next() {
-            Some(RespFrame::BulkString(key)) => Ok(HKeys {
-                key: String::from_utf8(key.0)?,
-            }),
-            _ => Err(CommandError::InvalidCommandArguments(
-                "Invalid key".to_string(),
-            )),
-        }
+        let cmd_names = ["hkeys"];
+        validate_command(&value, &cmd_names)?;
+        let args = extract_args(value, cmd_names.len())?;
+        Ok(Self(args.try_into()?))
     }
 }
 
@@ -244,16 +218,13 @@ mod tests {
 
         let cmd = HSet::try_from(input)?;
         assert_eq!(cmd.key, "myhash");
-        assert_eq!(cmd.values[0].0, "field");
+        assert_eq!(cmd.map[0].0, "field");
         assert_eq!(
-            cmd.values[0].1,
+            cmd.map[0].1,
             RespFrame::BulkString(BulkString::new("value"))
         );
-        assert_eq!(cmd.values[1].0, "name");
-        assert_eq!(
-            cmd.values[1].1,
-            RespFrame::BulkString(BulkString::new("vic"))
-        );
+        assert_eq!(cmd.map[1].0, "name");
+        assert_eq!(cmd.map[1].1, RespFrame::BulkString(BulkString::new("vic")));
 
         Ok(())
     }
@@ -284,9 +255,9 @@ mod tests {
     #[test]
     fn test_hgetall_cmd_execute() {
         let backend = Backend::new();
-        let cmd = HSet {
+        let map = Hmap {
             key: "family".to_string(),
-            values: vec![
+            map: vec![
                 (
                     "name".to_string(),
                     RespFrame::BulkString(BulkString::new("Vic")),
@@ -294,6 +265,7 @@ mod tests {
                 ("age".to_string(), RespFrame::Integer(10.into())),
             ],
         };
+        let cmd = HSet(map);
         let resp = cmd.execute(&backend);
         assert_eq!(resp, RespFrame::Integer(2));
 

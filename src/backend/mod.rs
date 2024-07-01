@@ -1,5 +1,5 @@
 use crate::RespFrame;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use derive_more::Deref;
 use std::sync::Arc;
 
@@ -8,8 +8,9 @@ pub struct Backend(Arc<BackendInner>);
 
 #[derive(Debug, Default)]
 pub struct BackendInner {
-    pub(crate) map: DashMap<String, RespFrame>,
-    pub(crate) hmap: DashMap<String, DashMap<String, RespFrame>>,
+    map: DashMap<String, RespFrame>,
+    hmap: DashMap<String, DashMap<String, RespFrame>>,
+    set: DashMap<String, DashSet<RespFrame>>,
 }
 
 impl Backend {
@@ -44,17 +45,36 @@ impl Backend {
         self.hmap.get(key).map(|v| v.clone())
     }
 
-    pub fn hkeys(&self, key: &str) -> Option<Vec<String>> {
-        self.hmap
-            .get(key)
-            .map(|v| v.iter().map(|v| v.key().to_owned()).collect())
-    }
-
     pub fn hdel(&self, key: &str, field: &str) -> bool {
         self.hmap
             .get(key)
             .map(|v| v.remove(field).is_some())
             .unwrap_or(false)
+    }
+
+    pub fn sadd(&self, key: String, member: RespFrame) -> bool {
+        let set = self.set.entry(key).or_default();
+        set.insert(member)
+    }
+
+    pub fn srem(&self, key: &str, member: &RespFrame) -> bool {
+        self.set
+            .get(key)
+            .map(|v| v.remove(member).is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn sismember(&self, key: &str, member: &RespFrame) -> bool {
+        self.set
+            .get(key)
+            .map(|v| v.contains(member))
+            .unwrap_or(false)
+    }
+
+    pub fn smembers(&self, key: &str) -> Option<Vec<RespFrame>> {
+        self.set
+            .get(key)
+            .map(|v| v.iter().map(|v| v.clone()).collect())
     }
 }
 
